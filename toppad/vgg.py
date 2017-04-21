@@ -19,8 +19,6 @@ train_file         = 'train.txt'
 test_file          = 'test.txt'
 val_file           = 'val.txt'
 
-test_set_size      = 100
-
 NUM_CHANNELS       = 3
 BATCH_SIZE         = 64
 IMAGE_SIZE         = 256
@@ -32,6 +30,9 @@ STEPS_PER_EPOCH    = int(DATASET_SIZE/BATCH_SIZE)
 OPTIMIZER          = 'Adam'
 MODEL_NAME         = 'norm'
 MODEL              = 'vgg16'
+COLOR_DISTORT      = True
+DROPOUT_RATE       = 0.0
+
 
 def encode_label(label):
   return int(label)
@@ -54,48 +55,67 @@ def read_images(input_queue):
     file_content = tf.read_file(input_queue[0])
     image = tf.image.decode_jpeg(file_content, channels=NUM_CHANNELS)
     image.set_shape([IMAGE_SIZE, IMAGE_SIZE, NUM_CHANNELS])
-    label = input_queue[1]  
+    label = input_queue[1] 
     return image, label
+
+def distort_color(image):
+    # Randomly adjust hue, contrast and saturation.
+    if COLOR_DISTORT == True:
+        image = tf.image.random_brightness(image, max_delta=32. / 255.)
+        image = tf.image.random_contrast(image, lower=0.5, upper=1.5)
+        image = tf.image.random_saturation(image, lower=0.5, upper=1.5)
+        image = tf.image.random_hue(image, max_delta=0.2)
+        image = tf.clip_by_value(image, 0.0, 1.0)
+    return image
 
 def pre_process_image(image, training):
     # This function takes a single image as input,
     # and a boolean whether to build the training or testing graph.
-    # vgg mean
-    mean = tf.constant([123.68, 116.779, 103.939], dtype=tf.float32, shape=[1, 1, 3], name='img_mean')
-    image = image - mean
+    image = tf.divide(image, 255.0)
     if training:
         # For training, add the following to the TensorFlow graph.
-
+        
         # Randomly crop the input image.
         image = tf.random_crop(image, size=[IMG_SIZE_CROPPED, IMG_SIZE_CROPPED, NUM_CHANNELS])
 
         # Randomly flip the image horizontally.
         image = tf.image.random_flip_left_right(image)
         
-        # Randomly adjust hue, contrast and saturation.
-        image = tf.image.random_hue(image, max_delta=0.05)
-        image = tf.image.random_contrast(image, lower=0.3, upper=1.0)
-        image = tf.image.random_brightness(image, max_delta=0.2)
-        image = tf.image.random_saturation(image, lower=0.0, upper=2.0)
-
-        # Some of these functions may overflow and result in pixel
-        # values beyond the [0, 1] range. It is unclear from the
-        # documentation of TensorFlow 0.10.0rc0 whether this is
-        # intended. A simple solution is to limit the range.
-
-        # Limit the image pixels between [0, 1] in case of overflow.
-        # image = tf.minimum(image, 1.0)
-        # image = tf.maximum(image, 0.0)
+        # Distor color
+        image = distort_color(image)
     else:
-        # For training, add the following to the TensorFlow graph.
-
         # Crop the input image around the centre so it is the same
         # size as images that are randomly cropped during training.
         image = tf.image.resize_image_with_crop_or_pad(image,
                                                        target_height=IMG_SIZE_CROPPED,
                                                        target_width=IMG_SIZE_CROPPED)
-
+    image = tf.subtract(image, 0.5)
+    image = tf.multiply(image, 2.0)
     return image
+    
+def pre_process_image_mean(image, training):
+    # This function takes a single image as input,
+    # and a boolean whether to build the training or testing graph.
+    mean = tf.constant([123.68, 116.779, 103.939], dtype=tf.float32, shape=[1, 1, 3], name='img_mean')
+    
+    if training:
+        # For training, add the following to the TensorFlow graph.
+        
+        # Randomly crop the input image.
+        image = tf.random_crop(image, size=[IMG_SIZE_CROPPED, IMG_SIZE_CROPPED, NUM_CHANNELS])
+
+        # Randomly flip the image horizontally.
+        image = tf.image.random_flip_left_right(image)
+        
+    else:
+        # Crop the input image around the centre so it is the same
+        # size as images that are randomly cropped during training.
+        image = tf.image.resize_image_with_crop_or_pad(image,
+                                                       target_height=IMG_SIZE_CROPPED,
+                                                       target_width=IMG_SIZE_CROPPED)
+    image = image - mean
+    return image
+    
 
 train_images, train_labels = read_image_list(dataset_path + train_file)
 test_images, test_labels = read_image_list(dataset_path + test_file)
@@ -240,9 +260,9 @@ def cnn_model_vgg_fn(features, labels, mode):
   # FC Layers
   flatten = tf.contrib.layers.flatten(pool5)
   fc1   = tf.layers.dense(inputs=flatten, units=4096, activation=tf.nn.relu, name="fc1")
-  dropout1 = tf.layers.dropout(inputs=fc1, rate=0.5, training=mode == learn.ModeKeys.TRAIN, name="dropout1")
+  dropout1 = tf.layers.dropout(inputs=fc1, rate=DROPOUT_RATE, training=mode == learn.ModeKeys.TRAIN, name="dropout1")
   fc2   = tf.layers.dense(inputs=dropout1, units=4096, activation=tf.nn.relu, name="fc2")
-  dropout2 = tf.layers.dropout(inputs=fc2, rate=0.5, training=mode == learn.ModeKeys.TRAIN, name="dropout2")
+  dropout2 = tf.layers.dropout(inputs=fc2, rate=DROPOUT_RATE, training=mode == learn.ModeKeys.TRAIN, name="dropout2")
 
   # Logits Layer
   logits = tf.layers.dense(inputs=dropout2, units=NUM_CLASSES, name="softmax")
@@ -250,6 +270,7 @@ def cnn_model_vgg_fn(features, labels, mode):
   loss = None
   train_op = None
 
+  tf.summary.image('images', features["images"])
   # Calculate Loss (for both TRAIN and EVAL modes)
   if mode != learn.ModeKeys.INFER:
     with tf.name_scope('loss'):
@@ -312,7 +333,7 @@ toppad_validator = learn.monitors.ValidationMonitor(
       metrics={"accuracy_synthetic": learn.MetricSpec(metric_fn=tf.metrics.accuracy, prediction_key="classes"),},
       early_stopping_metric="loss",
       early_stopping_metric_minimize=True,
-      early_stopping_rounds=STEPS_PER_EPOCH*3)
+      early_stopping_rounds=STEPS_PER_EPOCH*10)
 
 toppad_tester = learn.monitors.ValidationMonitor(
       input_fn=lambda: batch_input_fn(test_images, test_labels, batch_size=BATCH_SIZE, training=False),
@@ -320,7 +341,7 @@ toppad_tester = learn.monitors.ValidationMonitor(
       metrics={"accuracy_real": learn.MetricSpec(metric_fn=tf.metrics.accuracy, prediction_key="classes"),},)
 
 # Train the model
-num_epochs  = 50
+num_epochs  = 10000
 toppad_classifier.fit(
   input_fn=lambda: batch_input_fn(train_images, train_labels, batch_size=BATCH_SIZE, training=True, num_epochs=num_epochs),
   monitors=[toppad_validator, toppad_tester])
