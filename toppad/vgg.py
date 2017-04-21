@@ -303,13 +303,16 @@ def batch_input_fn(images, labels, batch_size=32, training=True, num_epochs=1):
     
 
 # Create the Estimator
-toppad_classifier = learn.Estimator(model_fn=cnn_model_vgg_fn, model_dir="toppad_classifier/{}_{}_{}_{}".format(MODEL_NAME, MODEL, OPTIMIZER, LEARNING_RATE))
+toppad_classifier = learn.Estimator(model_fn=cnn_model_vgg_fn, model_dir="log/{}_{}_{}_{}".format(MODEL_NAME, MODEL, OPTIMIZER, LEARNING_RATE))
 
 # Configure validation and test hooks
 toppad_validator = learn.monitors.ValidationMonitor(
       input_fn=lambda: batch_input_fn(val_images, val_labels, batch_size=BATCH_SIZE, training=False),
       every_n_steps=STEPS_PER_EPOCH,
-      metrics={"accuracy_synthetic": learn.MetricSpec(metric_fn=tf.metrics.accuracy, prediction_key="classes"),},)
+      metrics={"accuracy_synthetic": learn.MetricSpec(metric_fn=tf.metrics.accuracy, prediction_key="classes"),},
+      early_stopping_metric="loss",
+      early_stopping_metric_minimize=True,
+      early_stopping_rounds=STEPS_PER_EPOCH*3)
 
 toppad_tester = learn.monitors.ValidationMonitor(
       input_fn=lambda: batch_input_fn(test_images, test_labels, batch_size=BATCH_SIZE, training=False),

@@ -1,3 +1,5 @@
 mogrify -format jpg */*/*.png
 for file in *.JPG; do convert $file -resize "256x256!" $file; done
 convert real/tp_missing/*.JPG -format "%d/%f 1 %wx%h\n" info: > test.txt
+convert real/tp_normal/*.JPG -format "%d/%f 1 %wx%h\n" info: > target.txt
+synthetic/*missing*/*.jpg -format "%d/%f 1 %wx%h\n" info: > synthetic.txt;convert synthetic/*normal*/*.jpg -format "%d/%f 0 %wx%h\n" info: >> synthetic.txt
