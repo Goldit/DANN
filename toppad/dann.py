@@ -17,7 +17,7 @@ from flip_gradient import flip_gradient
 
 dataset_path       = "toppad/"
 source_file        = 'source.txt'
-target_file        = 'source.txt'
+target_file        = 'target.txt'
 test_file          = 'test.txt'
 val_file           = 'val.txt'
 
@@ -27,14 +27,16 @@ IMAGE_SIZE         = 256
 NUM_CLASSES        = 2
 NUM_DOMAINES       = 2
 IMG_SIZE_CROPPED   = 224
-LEARNING_RATE      = 0.001
+LEARNING_RATE      = 0.01
 DATASET_SIZE       = 40000
 STEPS_PER_EPOCH    = int(DATASET_SIZE/BATCH_SIZE)
 NUM_EPOCHES        = 100
 TOTAL_STEPS        = STEPS_PER_EPOCH * NUM_EPOCHES
 OPTIMIZER          = 'Adam'
-MODEL_NAME         = 'lp'
+MODEL_NAME         = 'dann'
 LAMBDA             = 10.0
+COLOR_DISTORT      = True
+DROPOUT_RATE       = 0.0
 
 def encode_label(label):
   return int(label)
@@ -53,6 +55,7 @@ def read_image_list(file):
     labels.append(encode_label(label))
   return filepaths, labels
 
+
 def read_images(input_queue):
     file_content = tf.read_file(input_queue[0])
     image = tf.image.decode_jpeg(file_content, channels=NUM_CHANNELS)
@@ -60,12 +63,46 @@ def read_images(input_queue):
     label = input_queue[1]  
     return image, label
 
+def distort_color(image):
+    # Randomly adjust hue, contrast and saturation.
+    if COLOR_DISTORT == True:
+        image = tf.image.random_brightness(image, max_delta=32. / 255.)
+        image = tf.image.random_contrast(image, lower=0.5, upper=1.5)
+        image = tf.image.random_saturation(image, lower=0.5, upper=1.5)
+        image = tf.image.random_hue(image, max_delta=0.2)
+        image = tf.clip_by_value(image, 0.0, 1.0)
+    return image
+
 def pre_process_image(image, training):
     # This function takes a single image as input,
     # and a boolean whether to build the training or testing graph.
-    # vgg mean
+    image = tf.divide(image, 255.0)
+    if training:
+        # For training, add the following to the TensorFlow graph.
+        
+        # Randomly crop the input image.
+        image = tf.random_crop(image, size=[IMG_SIZE_CROPPED, IMG_SIZE_CROPPED, NUM_CHANNELS])
+
+        # Randomly flip the image horizontally.
+        image = tf.image.random_flip_left_right(image)
+        
+        # Distor color
+        image = distort_color(image)
+    else:
+        # Crop the input image around the centre so it is the same
+        # size as images that are randomly cropped during training.
+        image = tf.image.resize_image_with_crop_or_pad(image,
+                                                       target_height=IMG_SIZE_CROPPED,
+                                                       target_width=IMG_SIZE_CROPPED)
+    image = tf.subtract(image, 0.5)
+    image = tf.multiply(image, 2.0)
+    return image
+
+def pre_process_image_mean(image, training):
+    # This function takes a single image as input,
+    # and a boolean whether to build the training or testing graph.
     mean = tf.constant([123.68, 116.779, 103.939], dtype=tf.float32, shape=[1, 1, 3], name='img_mean')
-    image = image - mean
+
     if training:
         # For training, add the following to the TensorFlow graph.
 
@@ -74,31 +111,16 @@ def pre_process_image(image, training):
 
         # Randomly flip the image horizontally.
         image = tf.image.random_flip_left_right(image)
-        
-        # Randomly adjust hue, contrast and saturation.
-        image = tf.image.random_hue(image, max_delta=0.05)
-        image = tf.image.random_contrast(image, lower=0.3, upper=1.0)
-        image = tf.image.random_brightness(image, max_delta=0.2)
-        image = tf.image.random_saturation(image, lower=0.0, upper=2.0)
 
-        # Some of these functions may overflow and result in pixel
-        # values beyond the [0, 1] range. It is unclear from the
-        # documentation of TensorFlow 0.10.0rc0 whether this is
-        # intended. A simple solution is to limit the range.
-
-        # Limit the image pixels between [0, 1] in case of overflow.
-        # image = tf.minimum(image, 1.0)
-        # image = tf.maximum(image, 0.0)
     else:
-        # For training, add the following to the TensorFlow graph.
-
         # Crop the input image around the centre so it is the same
         # size as images that are randomly cropped during training.
         image = tf.image.resize_image_with_crop_or_pad(image,
                                                        target_height=IMG_SIZE_CROPPED,
                                                        target_width=IMG_SIZE_CROPPED)
-
+    image = image - mean
     return image
+
 
 source_images, source_labels = read_image_list(dataset_path + source_file)
 target_images, target_labels = read_image_list(dataset_path + target_file)
@@ -246,10 +268,10 @@ def cnn_model_vgg_fn(features, labels, mode):
     with tf.name_scope('extract_lb_feat'):
         source_features =  tf.strided_slice(all_features, [0], [tf.to_int32(all_features.shape[0])], [2])
         classify_feats = tf.cond(tf.cast(mode == learn.ModeKeys.TRAIN, tf.bool), lambda:source_features, lambda:all_features)
-    lb_fc1   = tf.layers.dense(inputs=all_features, units=4096, activation=tf.nn.relu, name="lb_fc1")
-    lb_dropout1 = tf.layers.dropout(inputs=lb_fc1, rate=0.5, training=mode==learn.ModeKeys.TRAIN, name="lb_dropout1")
+    lb_fc1   = tf.layers.dense(inputs=classify_feats, units=4096, activation=tf.nn.relu, name="lb_fc1")
+    lb_dropout1 = tf.layers.dropout(inputs=lb_fc1, rate=DROPOUT_RATE, training=mode==learn.ModeKeys.TRAIN, name="lb_dropout1")
     lb_fc2   = tf.layers.dense(inputs=lb_dropout1, units=4096, activation=tf.nn.relu, name="lb_fc2")
-    lb_dropout2 = tf.layers.dropout(inputs=lb_fc2, rate=0.5, training=mode==learn.ModeKeys.TRAIN, name="lb_dropout2")
+    lb_dropout2 = tf.layers.dropout(inputs=lb_fc2, rate=DROPOUT_RATE, training=mode==learn.ModeKeys.TRAIN, name="lb_dropout2")
     label_logits = tf.layers.dense(inputs=lb_dropout2, units=NUM_CLASSES, name="lb_softmax")
 
     if mode == learn.ModeKeys.TRAIN:
@@ -259,9 +281,9 @@ def cnn_model_vgg_fn(features, labels, mode):
             l   = 2. / (1. + tf.exp(- LAMBDA * p)) - 1
             flipped_features = flip_gradient(all_features, l)
         dm_fc1   = tf.layers.dense(inputs=flipped_features, units=4096, activation=tf.nn.relu, name="dm_fc1")
-        dm_dropout1 = tf.layers.dropout(inputs=dm_fc1, rate=0.5, training=mode==learn.ModeKeys.TRAIN, name="dm_dropout1")
+        dm_dropout1 = tf.layers.dropout(inputs=dm_fc1, rate=DROPOUT_RATE, training=mode==learn.ModeKeys.TRAIN, name="dm_dropout1")
         dm_fc2   = tf.layers.dense(inputs=dm_dropout1, units=4096, activation=tf.nn.relu, name="dm_fc2")
-        dm_dropout2 = tf.layers.dropout(inputs=dm_fc2, rate=0.5, training=mode==learn.ModeKeys.TRAIN, name="dm_dropout2")
+        dm_dropout2 = tf.layers.dropout(inputs=dm_fc2, rate=DROPOUT_RATE, training=mode==learn.ModeKeys.TRAIN, name="dm_dropout2")
         domain_logits = tf.layers.dense(inputs=dm_dropout2, units=NUM_DOMAINES, name="dm_softmax")
 
     loss = None
@@ -271,7 +293,7 @@ def cnn_model_vgg_fn(features, labels, mode):
         with tf.name_scope('label_loss'):
             source_labels = tf.strided_slice(labels, [0], [tf.to_int32(labels.shape[0])], [2])
             classify_labels = tf.cond(tf.cast(mode == learn.ModeKeys.TRAIN, tf.bool), lambda:source_labels, lambda:labels)
-            onehot_labels = tf.one_hot(indices=tf.cast(labels, tf.int32), depth=NUM_CLASSES)
+            onehot_labels = tf.one_hot(indices=tf.cast(classify_labels, tf.int32), depth=NUM_CLASSES)
             label_loss = tf.losses.softmax_cross_entropy(onehot_labels=onehot_labels, logits=label_logits)
             loss = label_loss
     
@@ -279,10 +301,10 @@ def cnn_model_vgg_fn(features, labels, mode):
     if mode == learn.ModeKeys.TRAIN:
         with tf.name_scope('domain_loss'):
             domain_labels = tf.constant([i%2 for i in range(BATCH_SIZE)], tf.int32)
-            onehot_domain_labels = tf.one_hot(indices=tf.cast(domain_labels, tf.int32), depth=NUM_DOMAINES)
-            domain_loss = tf.losses.softmax_cross_entropy(onehot_labels=onehot_domain_labels, logits=domain_logits)
+            onehot_domains = tf.one_hot(indices=tf.cast(domain_labels, tf.int32), depth=NUM_DOMAINES)
+            domain_loss = tf.losses.softmax_cross_entropy(onehot_labels=onehot_domains, logits=domain_logits)
         with tf.name_scope('total_loss'):
-            loss = label_loss
+            loss = label_loss + domain_loss
             tf.summary.scalar("label_losss", label_loss)
             tf.summary.scalar("domain_loss", domain_loss)
         train_op = tf.contrib.layers.optimize_loss(
@@ -358,7 +380,7 @@ def batch_input_train_fn(source_images, source_labels, target_images, target_lab
     return batch_dict, batch_labels
     
 # Create the Estimator
-toppad_classifier = learn.Estimator(model_fn=cnn_model_vgg_fn, model_dir="toppad_classifier/{}_vgg16_{}_lr{}_lb{}".format(MODEL_NAME, OPTIMIZER, LEARNING_RATE, LAMBDA))
+toppad_classifier = learn.Estimator(model_fn=cnn_model_vgg_fn, model_dir="log/{}_vgg16_{}_{}".format(MODEL_NAME, OPTIMIZER, LEARNING_RATE))
 
 
 # Configure validation and test hooks
